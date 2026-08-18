@@ -2,6 +2,9 @@
 
 A modern, wearable/smartwatch-inspired dashboard interface built completely using **LVGL v8** for circular ESP32 boards (such as the ESP32-2424S012 / GC9A01 screen module). The hub dynamically intercepts BLE advertisements from nearby **RuuviTags**, parsing and rendering live real-time values including Temperature, Relative Humidity, Air Pressure, and sensor battery levels.
 
+Hardware: ESP32 Display 1.28 inch ESP32-C3 WiFi+BLE TFT LCD Module ESP32-2424S012 240x240 GC9A01 Touch Screen for Arduino IoT Smart Home
+AliExpress: https://www.aliexpress.com/item/1005007051709033.html
+
 ## Features
 - 🔹 **Deep Blue Neon UI**: High-contrast, clean circular graphs and layouts.
 - 🔹 **Real-time Synchronization Clock**: Internet NTP-time displayed in 24h format.
