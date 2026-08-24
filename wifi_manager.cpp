@@ -56,7 +56,7 @@ void tick_wifi_manager(void) {
     // Sync time once Wi-Fi connects successfully
     if (WiFi.status() == WL_CONNECTED && !ntp_active) {
         Serial.println("Wi-Fi connected! Fetching NTP time...");
-        configTime(3600, 3600, "pool.ntp.org"); // GMT+1 with standard European DST
+        configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org");
         ntp_active = true;
     }
 
