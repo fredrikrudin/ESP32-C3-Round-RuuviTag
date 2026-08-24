@@ -23,6 +23,9 @@ Ensure the following libraries are installed via your Library Manager:
 - `lvgl` (Strictly within the **8.x.x** lifecycle, e.g., v8.3.11)
 - `TFT_eSPI` (by Bodmer)
 
+## Warning
+When installing lvgl via the Arduino IDE's Library Manager, make sure you absolutely do not install the latest version (v9.x). The code will crash with hundreds of error messages if run on version 9. Manually select a version in the 8.3 series (e.g. v8.3.11) from the drop-down list before pressing install.
+
 ### Driver Setup (`User_Setup.h`)
 Navigate to your computer's `libraries/TFT_eSPI/` installation path and swap or append these active configurations into `User_Setup.h`:
 If you have a standard ESP32-2424S012 (GC9A01 1.28"): Then GPIO 22 controls the screen backlight. If you leave #define TFT_BL 3, the screen will remain completely black because the wrong pin is sending out the brightness. Double-check your specific hardware manual and change to 22 if the screen does not light up.
