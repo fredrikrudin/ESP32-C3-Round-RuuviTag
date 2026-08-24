@@ -47,13 +47,15 @@ static void wifi_pass_ready_cb(lv_event_t * e) {
 static void wifi_network_select_cb(lv_event_t * e) {
     save_selected_ssid(lv_list_get_button_text(wifi_list, lv_event_get_target(e)));
     
-    wifi_ta_pass = lv_textarea_create(lv_screen_act());
+    // ÄNDRAT: lv_screen_act() -> lv_scr_act()
+    wifi_ta_pass = lv_textarea_create(lv_scr_act());
     lv_textarea_set_password_mode(wifi_ta_pass, true);
     lv_obj_set_size(wifi_ta_pass, 200, 40);
     lv_obj_align(wifi_ta_pass, LV_ALIGN_TOP_MID, 0, 15);
     lv_obj_add_event_cb(wifi_ta_pass, wifi_pass_ready_cb, LV_EVENT_ALL, NULL);
 
-    wifi_kb = lv_keyboard_create(lv_screen_act());
+    // ÄNDRAT: lv_screen_act() -> lv_scr_act()
+    wifi_kb = lv_keyboard_create(lv_scr_act());
     lv_obj_set_size(wifi_kb, 240, 120);
     lv_obj_align(wifi_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(wifi_kb, wifi_ta_pass);
@@ -181,7 +183,8 @@ void gui_init_ruuvi_hub(void) {
     pinMode(TFT_BL, OUTPUT);
     set_display_brightness(current_brightness);
 
-    tv = lv_tileview_create(lv_screen_act());
+    // ÄNDRAT: lv_screen_act() -> lv_scr_act()
+    tv = lv_tileview_create(lv_scr_act());
     page_main = lv_tileview_add_tile(tv, 0, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
     create_page_main(page_main);
 
