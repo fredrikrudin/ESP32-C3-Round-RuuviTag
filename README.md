@@ -25,7 +25,7 @@ Ensure the following libraries are installed via your Library Manager:
 
 ### Driver Setup (`User_Setup.h`)
 Navigate to your computer's `libraries/TFT_eSPI/` installation path and swap or append these active configurations into `User_Setup.h`:
-
+If you have a standard ESP32-2424S012 (GC9A01 1.28"): Then GPIO 22 controls the screen backlight. If you leave #define TFT_BL 3, the screen will remain completely black because the wrong pin is sending out the brightness. Double-check your specific hardware manual and change to 22 if the screen does not light up.
 ```cpp
 #define GC9A01_DRIVER
 #define TFT_MISO -1
@@ -34,7 +34,8 @@ Navigate to your computer's `libraries/TFT_eSPI/` installation path and swap or 
 #define TFT_CS   2
 #define TFT_DC   3
 #define TFT_RST  10
-#define TFT_BL   22
+#define TFT_BL   22 <--
+#define TFT_BL 3 <--
 #define SPI_FREQUENCY  40000000
 #define LOAD_GLCD
 ```
