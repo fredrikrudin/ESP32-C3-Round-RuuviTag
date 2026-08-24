@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include "wifi_manager.h"
 
-#define TFT_BL 3
+#define TFT_BL 22
 
 // Global UI Objects (Accessed by other modules via extern)
 lv_obj_t *lbl_temp;
