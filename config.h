@@ -25,6 +25,11 @@
 #define NIGHT_BRIGHTNESS  15
 #define NIGHT_WAKE_MS     20000UL   // touch during night mode -> normal brightness for this long
 
+// Navigation
+#define LONG_PRESS_MS       700UL     // long press on the main screen opens the setup screens
+#define SETTINGS_TIMEOUT_MS 60000UL   // setup screens return to the main screen after this idle time
+#define VIEW_REVERT_MS      60000UL   // main screen returns to the default sensor after this idle time (0 = never)
+
 // BLE
 #define BLE_SCAN_WINDOW_S 3         // seconds per scan burst in periodic mode
 

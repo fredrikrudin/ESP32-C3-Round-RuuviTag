@@ -8,40 +8,13 @@
 // Written by the BLE host task, read by the main (LVGL) task -> guard with a spinlock.
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
-static RuuviReading live;
-static uint32_t     live_ms  = 0;
-static bool         live_has = false;
-
-// Tag selection
-static bool    sel_has = false;
-static uint8_t sel_mac[6];
-static bool     auto_valid = false;
-static uint8_t  auto_mac[6];
-static int      auto_rssi = -127;
-static uint32_t auto_ms = 0;
-
-// Recently seen tags (for the selection UI)
-struct SeenSlot { bool used; uint8_t mac[6]; int8_t rssi; uint32_t ms; };
-static SeenSlot seen[RUUVI_MAX_SEEN];
+// Latest reading of every RuuviTag heard (so the UI can flip between sensors instantly).
+struct Slot { bool used; RuuviReading r; uint32_t ms; };
+static Slot slots[RUUVI_MAX_SEEN];
 
 static bool     continuous_running = false;
 static uint32_t last_scan_ms  = 0;
 static uint32_t last_clear_ms = 0;
-
-// Must be called with the lock held.
-static void seen_update(const uint8_t* mac, int rssi, uint32_t now) {
-  int slot = -1, oldest = 0;
-  for (int i = 0; i < RUUVI_MAX_SEEN; i++) {
-    if (seen[i].used && memcmp(seen[i].mac, mac, 6) == 0) { slot = i; break; }
-    if (!seen[i].used) { if (slot < 0) slot = i; }
-    else if (seen[i].ms < seen[oldest].ms) oldest = i;
-  }
-  if (slot < 0) slot = oldest;
-  seen[slot].used = true;
-  memcpy(seen[slot].mac, mac, 6);
-  seen[slot].rssi = (int8_t)rssi;
-  seen[slot].ms = now;
-}
 
 // d = manufacturer data incl. 2-byte company id: 99 04 | 05 | payload... (26 bytes)
 static void handle_format5(const uint8_t* d, int rssi) {
@@ -66,34 +39,19 @@ static void handle_format5(const uint8_t* d, int rssi) {
   r.rssi     = (int8_t)rssi;
   memcpy(r.mac, d + 20, 6);
 
-  const uint8_t* mac = d + 20;
   uint32_t now = millis();
 
   portENTER_CRITICAL(&mux);
-  seen_update(mac, rssi, now);
-
-  bool accept;
-  if (sel_has) {
-    accept = (memcmp(mac, sel_mac, 6) == 0);
-  } else {
-    // Auto mode: follow the strongest tag, with hysteresis so we don't flip-flop.
-    bool tracked = auto_valid && (now - auto_ms) < 30000;
-    bool same    = auto_valid && memcmp(mac, auto_mac, 6) == 0;
-    if (!tracked || same || rssi >= auto_rssi + 8) {
-      memcpy(auto_mac, mac, 6);
-      auto_rssi = rssi;
-      auto_ms = now;
-      auto_valid = true;
-      accept = true;
-    } else {
-      accept = false;
-    }
+  int idx = -1, oldest = 0;
+  for (int i = 0; i < RUUVI_MAX_SEEN; i++) {
+    if (slots[i].used && memcmp(slots[i].r.mac, r.mac, 6) == 0) { idx = i; break; }
+    if (!slots[i].used) { if (idx < 0) idx = i; }
+    else if (slots[i].ms < slots[oldest].ms) oldest = i;
   }
-  if (accept) {
-    live = r;
-    live_ms = now;
-    live_has = true;
-  }
+  if (idx < 0) idx = oldest;        // table full: replace the tag heard longest ago
+  slots[idx].used = true;
+  slots[idx].r = r;
+  slots[idx].ms = now;
   portEXIT_CRITICAL(&mux);
 }
 
@@ -110,16 +68,20 @@ class RuuviCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
 static RuuviCallbacks callbacks;
 
-bool ruuvi_get_reading(RuuviReading* out) {
-  bool has;
+bool ruuvi_get_reading(const uint8_t* mac, RuuviReading* out) {
+  bool found = false;
+  uint32_t now = millis();
   portENTER_CRITICAL(&mux);
-  has = live_has;
-  if (has) {
-    *out = live;
-    out->age_ms = millis() - live_ms;
+  for (int i = 0; i < RUUVI_MAX_SEEN; i++) {
+    if (slots[i].used && memcmp(slots[i].r.mac, mac, 6) == 0) {
+      *out = slots[i].r;
+      out->age_ms = now - slots[i].ms;
+      found = true;
+      break;
+    }
   }
   portEXIT_CRITICAL(&mux);
-  return has;
+  return found;
 }
 
 int ruuvi_get_seen(RuuviSeen* out, int max) {
@@ -127,33 +89,29 @@ int ruuvi_get_seen(RuuviSeen* out, int max) {
   uint32_t now = millis();
   portENTER_CRITICAL(&mux);
   for (int i = 0; i < RUUVI_MAX_SEEN && n < max; i++) {
-    if (!seen[i].used) continue;
-    memcpy(out[n].mac, seen[i].mac, 6);
-    out[n].rssi = seen[i].rssi;
-    out[n].age_ms = now - seen[i].ms;
+    if (!slots[i].used) continue;
+    memcpy(out[n].mac, slots[i].r.mac, 6);
+    out[n].rssi = slots[i].r.rssi;
+    out[n].age_ms = now - slots[i].ms;
     n++;
   }
   portEXIT_CRITICAL(&mux);
+
+  // insertion sort by MAC so the order never jumps around
+  for (int i = 1; i < n; i++) {
+    RuuviSeen key = out[i];
+    int j = i - 1;
+    while (j >= 0 && memcmp(out[j].mac, key.mac, 6) > 0) { out[j + 1] = out[j]; j--; }
+    out[j + 1] = key;
+  }
   return n;
 }
 
-void ruuvi_select_mac(const uint8_t* mac) {
-  portENTER_CRITICAL(&mux);
-  if (mac) { sel_has = true; memcpy(sel_mac, mac, 6); }
-  else     { sel_has = false; }
-  auto_valid = false;
-  live_has = false;                 // drop data from the previously followed tag
-  portEXIT_CRITICAL(&mux);
-
-  g_settings.has_mac = (mac != nullptr);
-  if (mac) memcpy(g_settings.mac, mac, 6);
-  settings_request_save();
+void ruuvi_format_name(const uint8_t* mac, char* out, size_t n) {
+  snprintf(out, n, "Ruuvi %02X%02X", mac[4], mac[5]);
 }
 
 void init_ruuvi_ble(void) {
-  sel_has = g_settings.has_mac;
-  memcpy(sel_mac, g_settings.mac, 6);
-
   NimBLEDevice::init("");
   NimBLEScan* pScan = NimBLEDevice::getScan();
   // wantDuplicates = true: otherwise a tag is reported only once per scan and

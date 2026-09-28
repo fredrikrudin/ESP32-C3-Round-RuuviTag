@@ -1,5 +1,10 @@
 // LVGL 8.3.x UI for a 240x240 round display.
-// Tiles (swipe left/right):  Main | Settings | Wi-Fi | Sensor
+//
+//  MAIN SCREEN   swipe left/right = previous/next sensor, swipe up/down = brightness,
+//                long press = open the setup screens.
+//  SETUP SCREENS Settings | Wi-Fi | Sensor  (swipe or tap < >), "Back" returns to the main
+//                screen (also automatically after SETTINGS_TIMEOUT_MS without a touch).
+//
 // All widgets are kept inside the visible circle (radius 120 around 120,120).
 
 #include <Arduino.h>
@@ -13,17 +18,25 @@
 #include "ruuvi_ble.h"
 #include "gui_ruuvi.h"
 
+#define NUM_SETUP_PAGES 3
+
 #define COL_BG_MAIN   lv_color_make(5, 10, 25)
 #define COL_BG_PAGE   lv_color_make(10, 15, 35)
 #define COL_PANEL     lv_color_make(15, 35, 75)
 #define COL_ACCENT    lv_color_make(0, 190, 255)
 #define COL_TITLE     lv_color_make(0, 150, 255)
+#define COL_SOFT      lv_color_make(180, 210, 255)
 #define COL_GREY      lv_color_make(90, 100, 120)
+#define COL_DIM       lv_color_make(120, 140, 180)
+#define COL_WIFI_ON   lv_color_make(140, 150, 170)   // dim grey: connected / lit bar
+#define COL_WIFI_OFF  lv_color_make(45, 52, 68)      // unlit bar / disconnected symbol
 
-// ---- widgets -------------------------------------------------------------
-static lv_obj_t *tv, *page_main, *page_settings, *page_wifi, *page_sensor;
+// ---- screens and widgets ---------------------------------------------------
+static lv_obj_t *scr_main, *scr_setup;
+static lv_obj_t *tv_setup, *page_settings, *page_wifi, *page_sensor;
 
-static lv_obj_t *arc_hum, *lbl_temp, *lbl_hum_text, *lbl_pres, *lbl_clock;
+static lv_obj_t *arc_hum, *lbl_temp, *lbl_hum_text, *lbl_pres, *lbl_clock, *lbl_sensor;
+static lv_obj_t *wifi_sym, *wifi_bar[4];
 
 static lv_obj_t *dd_interval, *roller_start, *roller_end, *sw_wifi_sleep;
 
@@ -34,7 +47,7 @@ static lv_obj_t *tag_cur_lbl, *tag_list;
 
 static lv_style_t style_roller;
 
-// ---- state ---------------------------------------------------------------
+// ---- state -----------------------------------------------------------------
 static uint32_t night_override_until = 0;
 static bool     night_now = false;
 
@@ -44,12 +57,24 @@ static int  ssid_count = 0;
 static bool wifi_scanning = false;
 static char sel_ssid[33];
 
-static RuuviSeen seen_cache[RUUVI_MAX_SEEN];
+static RuuviSeen seen_cache[RUUVI_MAX_SEEN + 1];   // +1: the default tag if it is not currently heard
 static int       seen_n = 0;
+
+// Which sensor the main screen shows
+static bool    view_auto = true;          // true = follow the strongest tag
+static uint8_t view_mac[6];               // used when view_auto == false
+static bool    auto_valid = false;
+static uint8_t auto_mac[6];               // tag currently followed in auto mode
 
 static const int kIntervals[] = {5, 30, 60, 0};
 
-// ---- helpers -------------------------------------------------------------
+static void update_wifi_indicator();
+static void ui_update_cb(lv_timer_t *t);
+static void gui_refresh_tags(void);
+static void refresh_tags_async(void *unused);
+static void close_wifi_modal();
+
+// ---- helpers ---------------------------------------------------------------
 static void set_text_if_changed(lv_obj_t *l, const char *t) {
   if (strcmp(lv_label_get_text(l), t) != 0) lv_label_set_text(l, t);
 }
@@ -79,7 +104,7 @@ static uint32_t stale_limit_ms() {
   return lim < 120000UL ? 120000UL : lim;
 }
 
-// ---- brightness / night mode --------------------------------------------
+// ---- brightness / night mode -----------------------------------------------
 static bool is_night(int hr) {
   int s = g_settings.night_start, e = g_settings.night_end;
   if (s == e) return false;
@@ -99,9 +124,121 @@ void gui_notify_touch(void) {
   }
 }
 
-// ---- main page events ----------------------------------------------------
-static void gesture_event_cb(lv_event_t *e) {
+// ---- which sensor is shown -------------------------------------------------
+static void view_reset_to_default() {
+  if (g_settings.has_mac) {
+    view_auto = false;
+    memcpy(view_mac, g_settings.mac, 6);
+  } else {
+    view_auto = true;
+  }
+}
+
+// Auto mode: strongest tag heard recently, with hysteresis so the view does not flip-flop.
+static bool pick_auto(const RuuviSeen *seen, int n, uint8_t *out) {
+  int cur = -1, best = -1;
+  for (int i = 0; i < n; i++) {
+    if (seen[i].age_ms > 60000UL) continue;
+    if (best < 0 || seen[i].rssi > seen[best].rssi) best = i;
+    if (auto_valid && memcmp(seen[i].mac, auto_mac, 6) == 0) cur = i;
+  }
+  if (best < 0) return false;
+  int pick = best;
+  if (cur >= 0 && seen[cur].age_ms < 30000UL && seen[best].rssi < seen[cur].rssi + 8) pick = cur;
+  memcpy(out, seen[pick].mac, 6);
+  return true;
+}
+
+// dir = +1 next sensor, -1 previous sensor (wraps around)
+static void sensor_step(int dir) {
+  RuuviSeen sn[RUUVI_MAX_SEEN];
+  int n = ruuvi_get_seen(sn, RUUVI_MAX_SEEN);
+
+  uint8_t cyc[RUUVI_MAX_SEEN + 1][6];
+  int m = 0;
+  for (int i = 0; i < n; i++) memcpy(cyc[m++], sn[i].mac, 6);
+
+  const uint8_t *cur = view_auto ? (auto_valid ? auto_mac : NULL) : view_mac;
+  int idx = -1;
+  if (cur) {
+    for (int i = 0; i < m; i++) if (memcmp(cyc[i], cur, 6) == 0) idx = i;
+    if (idx < 0) { memcpy(cyc[m], cur, 6); idx = m; m++; }   // shown tag not heard right now
+  }
+  if (m <= 1) return;                                        // nothing to flip to
+
+  int next = (idx < 0) ? (dir > 0 ? 0 : m - 1) : (idx + dir + m) % m;
+  uint8_t chosen[6];
+  memcpy(chosen, cyc[next], 6);
+  view_auto = false;
+  memcpy(view_mac, chosen, 6);
+  ui_update_cb(NULL);
+}
+
+static void step_cb(lv_event_t *e) {
+  sensor_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+// ---- footer helpers --------------------------------------------------------
+static void make_arrow(lv_obj_t *parent, const char *txt, int x_off, lv_event_cb_t cb, void *ud) {
+  lv_obj_t *l = lv_label_create(parent);
+  lv_label_set_text(l, txt);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(l, COL_TITLE, 0);
+  lv_obj_align(l, LV_ALIGN_BOTTOM_MID, x_off, -15);
+  lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(l, 14);
+  lv_obj_add_event_cb(l, cb, LV_EVENT_CLICKED, ud);
+}
+
+static lv_obj_t *make_footer_text(lv_obj_t *parent, const char *text, lv_color_t col,
+                                  lv_event_cb_t cb) {
+  lv_obj_t *m = lv_label_create(parent);
+  lv_label_set_long_mode(m, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(m, 88);
+  lv_label_set_text(m, text);
+  lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(m, col, 0);
+  lv_obj_align(m, LV_ALIGN_BOTTOM_MID, 0, -16);
+  if (cb) {
+    lv_obj_add_flag(m, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(m, 10);
+    lv_obj_add_event_cb(m, cb, LV_EVENT_CLICKED, NULL);
+  }
+  return m;
+}
+
+// ---- screen switching ------------------------------------------------------
+static void open_setup() {
+  lv_obj_set_tile_id(tv_setup, 0, 0, LV_ANIM_OFF);
+  lv_scr_load_anim(scr_setup, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+  lv_async_call(refresh_tags_async, NULL);
+}
+
+static void go_main() {
+  if (wifi_modal) close_wifi_modal();
+  lv_scr_load_anim(scr_main, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+}
+
+static void back_cb(lv_event_t *e) { go_main(); }
+
+static void setup_nav_cb(lv_event_t *e) {
+  intptr_t col = (intptr_t)lv_event_get_user_data(e);
+  lv_obj_set_tile_id(tv_setup, (uint32_t)col, 0, LV_ANIM_ON);
+}
+
+// "<" previous page - "Back" - ">" next page
+static void setup_footer(lv_obj_t *parent, int col) {
+  if (col > 0)                   make_arrow(parent, "<", -54, setup_nav_cb, (void *)(intptr_t)(col - 1));
+  if (col < NUM_SETUP_PAGES - 1) make_arrow(parent, ">",  54, setup_nav_cb, (void *)(intptr_t)(col + 1));
+  make_footer_text(parent, "Back", COL_TITLE, back_cb);
+}
+
+// ---- main screen events ----------------------------------------------------
+static void main_gesture_cb(lv_event_t *e) {
   lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+  if (dir == LV_DIR_LEFT)  { sensor_step(+1); return; }
+  if (dir == LV_DIR_RIGHT) { sensor_step(-1); return; }
+
   int b = g_settings.brightness;
   if (dir == LV_DIR_TOP)         b += BRIGHTNESS_STEP;
   else if (dir == LV_DIR_BOTTOM) b -= BRIGHTNESS_STEP;
@@ -114,7 +251,9 @@ static void gesture_event_cb(lv_event_t *e) {
   apply_brightness();
 }
 
-// ---- settings page events ------------------------------------------------
+static void main_long_press_cb(lv_event_t *e) { open_setup(); }
+
+// ---- settings page events --------------------------------------------------
 static void dd_interval_cb(lv_event_t *e) {
   uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
   if (sel < 4) {
@@ -136,7 +275,7 @@ static void sw_sleep_cb(lv_event_t *e) {
   settings_request_save();
 }
 
-// ---- wifi page -----------------------------------------------------------
+// ---- wifi page -------------------------------------------------------------
 static void close_wifi_modal() {
   if (wifi_modal) lv_obj_del_async(wifi_modal);
   wifi_modal = wifi_ta = wifi_kb = NULL;
@@ -236,58 +375,114 @@ static void wifi_poll_cb(lv_timer_t *t) {
   wifi_scan_finish();
 }
 
-// ---- sensor page ---------------------------------------------------------
-static void fmt_mac(char *out, size_t n, const uint8_t *m) {
-  snprintf(out, n, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+// ---- sensor page: tick boxes, the ticked one is the default sensor ----------
+static void add_tag_row(const char *text, bool checked, intptr_t idx);
+
+static void tag_row_cb(lv_event_t *e) {
+  intptr_t idx = (intptr_t)lv_event_get_user_data(e);
+  if (idx < 0) {                                              // Auto (strongest)
+    g_settings.has_mac = false;
+  } else if (idx < seen_n) {
+    g_settings.has_mac = true;
+    memcpy(g_settings.mac, seen_cache[idx].mac, 6);
+  }
+  settings_request_save();
+  view_reset_to_default();                                    // main screen follows the new default
+  lv_async_call(refresh_tags_async, NULL);                    // never rebuild the list inside its own callback
 }
 
-static void tag_select_cb(lv_event_t *e);
+static void add_tag_row(const char *text, bool checked, intptr_t idx) {
+  lv_obj_t *cb = lv_checkbox_create(tag_list);
+  lv_checkbox_set_text(cb, text);
+  lv_obj_set_style_text_color(cb, lv_color_white(), 0);
+  lv_obj_set_style_bg_color(cb, COL_PANEL, LV_PART_INDICATOR);
+  lv_obj_set_style_border_color(cb, COL_ACCENT, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(cb, COL_ACCENT, LV_PART_INDICATOR | LV_STATE_CHECKED);
+  if (checked) lv_obj_add_state(cb, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(cb, tag_row_cb, LV_EVENT_VALUE_CHANGED, (void *)idx);
+}
 
-static void refresh_tag_list(void *unused) {
-  char txt[48], mac[20];
-  lv_list_clean(tag_list);
+// (Re)builds the tick-box list. Never call this from inside a row's own callback.
+static void gui_refresh_tags(void) {
+  char txt[40], nm[20];
+  lv_obj_clean(tag_list);
 
-  lv_obj_t *b = lv_list_add_btn(tag_list, g_settings.has_mac ? NULL : LV_SYMBOL_OK, "Auto (strongest)");
-  lv_obj_add_event_cb(b, tag_select_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+  add_tag_row("Auto (strongest)", !g_settings.has_mac, -1);
 
   seen_n = ruuvi_get_seen(seen_cache, RUUVI_MAX_SEEN);
+
+  // Make sure the default tag is always listed, even if it is not heard right now.
+  if (g_settings.has_mac) {
+    bool listed = false;
+    for (int i = 0; i < seen_n; i++) {
+      if (memcmp(seen_cache[i].mac, g_settings.mac, 6) == 0) { listed = true; break; }
+    }
+    if (!listed) {
+      memcpy(seen_cache[seen_n].mac, g_settings.mac, 6);
+      seen_cache[seen_n].rssi = 0;
+      seen_cache[seen_n].age_ms = 0xFFFFFFFFUL;
+      seen_n++;
+    }
+  }
+
   for (int i = 0; i < seen_n; i++) {
-    fmt_mac(mac, sizeof(mac), seen_cache[i].mac);
-    snprintf(txt, sizeof(txt), "%s  %d", mac, (int)seen_cache[i].rssi);
+    ruuvi_format_name(seen_cache[i].mac, nm, sizeof(nm));
+    if (seen_cache[i].age_ms == 0xFFFFFFFFUL) snprintf(txt, sizeof(txt), "%s (--)", nm);
+    else snprintf(txt, sizeof(txt), "%s (%d)", nm, (int)seen_cache[i].rssi);
     bool selected = g_settings.has_mac && memcmp(g_settings.mac, seen_cache[i].mac, 6) == 0;
-    lv_obj_t *bi = lv_list_add_btn(tag_list, selected ? LV_SYMBOL_OK : LV_SYMBOL_BLUETOOTH, txt);
-    lv_obj_add_event_cb(bi, tag_select_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    add_tag_row(txt, selected, i);
   }
 
   if (g_settings.has_mac) {
-    fmt_mac(mac, sizeof(mac), g_settings.mac);
-    snprintf(txt, sizeof(txt), "Using: %s", mac);
+    ruuvi_format_name(g_settings.mac, nm, sizeof(nm));
+    snprintf(txt, sizeof(txt), "Default: %s", nm);
   } else {
-    snprintf(txt, sizeof(txt), "Using: auto");
+    snprintf(txt, sizeof(txt), "Default: auto");
   }
   lv_label_set_text(tag_cur_lbl, txt);
 }
 
-static void tag_select_cb(lv_event_t *e) {
-  intptr_t idx = (intptr_t)lv_event_get_user_data(e);
-  if (idx < 0) ruuvi_select_mac(NULL);
-  else if (idx < seen_n) ruuvi_select_mac(seen_cache[idx].mac);
-  lv_async_call(refresh_tag_list, NULL);     // never rebuild a list inside its own button callback
-}
+static void refresh_tags_async(void *unused) { gui_refresh_tags(); }
 
 static void tag_refresh_btn_cb(lv_event_t *e) {
-  lv_async_call(refresh_tag_list, NULL);
+  lv_async_call(refresh_tags_async, NULL);
 }
 
 static void tile_changed_cb(lv_event_t *e) {
-  if (lv_tileview_get_tile_act(tv) == page_sensor) lv_async_call(refresh_tag_list, NULL);
+  if (lv_tileview_get_tile_act(tv_setup) == page_sensor) lv_async_call(refresh_tags_async, NULL);
 }
 
-// ---- periodic UI updates -------------------------------------------------
+// ---- periodic UI updates ---------------------------------------------------
 static void ui_update_cb(lv_timer_t *t) {
+  // Decide which tag to show
+  uint8_t target[6];
+  bool have_target = false;
+  if (view_auto) {
+    RuuviSeen sn[RUUVI_MAX_SEEN];
+    int n = ruuvi_get_seen(sn, RUUVI_MAX_SEEN);
+    if (pick_auto(sn, n, target)) {
+      have_target = true;
+      memcpy(auto_mac, target, 6);
+      auto_valid = true;
+    }
+  } else {
+    memcpy(target, view_mac, 6);
+    have_target = true;
+  }
+
   RuuviReading r;
-  bool have = ruuvi_get_reading(&r);
+  bool have = have_target && ruuvi_get_reading(target, &r);
+  bool stale = have && r.age_ms > stale_limit_ms();
   char buf[64];
+
+  // Footer: which sensor is shown
+  char nm[24];
+  if (have && view_auto)         snprintf(nm, sizeof(nm), "Auto: %02X%02X", r.mac[4], r.mac[5]);
+  else if (have)                 ruuvi_format_name(r.mac, nm, sizeof(nm));
+  else if (!view_auto)           ruuvi_format_name(view_mac, nm, sizeof(nm));
+  else                           snprintf(nm, sizeof(nm), "Searching");
+  set_text_if_changed(lbl_sensor, nm);
+  set_color_if_changed(lbl_sensor, (have && !stale) ? COL_SOFT : COL_GREY);
 
   if (!have) {
     set_text_if_changed(lbl_temp, "--.-°");
@@ -298,8 +493,6 @@ static void ui_update_cb(lv_timer_t *t) {
     set_text_if_changed(lbl_pres, "---- hPa\n" LV_SYMBOL_BATTERY_EMPTY " -.-- V");
     return;
   }
-
-  bool stale = r.age_ms > stale_limit_ms();
 
   if (r.temp_ok) snprintf(buf, sizeof(buf), "%.1f°", r.temp_c);
   else           snprintf(buf, sizeof(buf), "--.-°");
@@ -337,9 +530,64 @@ static void clock_cb(lv_timer_t *t) {
   apply_brightness();
 
   set_text_if_changed(wifi_status_lbl, wifi_status_text());
+  update_wifi_indicator();
+
+  // Idle handling (touch based): leave setup, return to the default sensor
+  uint32_t idle = lv_disp_get_inactive_time(NULL);
+  if (lv_scr_act() == scr_setup && !wifi_modal && idle > SETTINGS_TIMEOUT_MS) go_main();
+  if (VIEW_REVERT_MS && idle > VIEW_REVERT_MS) view_reset_to_default();
 }
 
-// ---- page construction ---------------------------------------------------
+// ---- Wi-Fi symbol + 4 signal bars (dim grey), shown under the clock ----------
+static int wifi_level_from_dbm(int dbm) {
+  if (dbm == 0)   return -1;      // not connected
+  if (dbm >= -55) return 4;
+  if (dbm >= -65) return 3;
+  if (dbm >= -75) return 2;
+  return 1;
+}
+
+static void update_wifi_indicator() {
+  static int last_level = -2;
+  int level = wifi_level_from_dbm(wifi_signal_dbm());
+  if (level == last_level) return;
+  last_level = level;
+  set_color_if_changed(wifi_sym, level >= 0 ? COL_WIFI_ON : COL_WIFI_OFF);
+  for (int i = 0; i < 4; i++) {
+    lv_obj_set_style_bg_color(wifi_bar[i], (i < level) ? COL_WIFI_ON : COL_WIFI_OFF, 0);
+  }
+}
+
+static void create_wifi_indicator(lv_obj_t *parent) {
+  lv_obj_t *box = lv_obj_create(parent);
+  lv_obj_set_size(box, 38, 14);
+  lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 57);
+  lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(box, 0, 0);
+  lv_obj_set_style_pad_all(box, 0, 0);
+  lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);          // let swipes reach the screen
+
+  wifi_sym = lv_label_create(box);
+  lv_label_set_text(wifi_sym, LV_SYMBOL_WIFI);
+  lv_obj_set_style_text_color(wifi_sym, COL_WIFI_OFF, 0);
+  lv_obj_align(wifi_sym, LV_ALIGN_LEFT_MID, 0, 0);
+
+  static const int heights[4] = {4, 7, 10, 13};
+  for (int i = 0; i < 4; i++) {
+    wifi_bar[i] = lv_obj_create(box);
+    lv_obj_set_size(wifi_bar[i], 3, heights[i]);
+    lv_obj_align(wifi_bar[i], LV_ALIGN_BOTTOM_LEFT, 19 + i * 5, 0);
+    lv_obj_set_style_bg_color(wifi_bar[i], COL_WIFI_OFF, 0);
+    lv_obj_set_style_bg_opa(wifi_bar[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(wifi_bar[i], 0, 0);
+    lv_obj_set_style_radius(wifi_bar[i], 1, 0);
+    lv_obj_clear_flag(wifi_bar[i], LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(wifi_bar[i], LV_OBJ_FLAG_CLICKABLE);
+  }
+}
+
+// ---- screen construction ---------------------------------------------------
 static void make_title(lv_obj_t *parent, const char *text, int y) {
   lv_obj_t *title = lv_label_create(parent);
   lv_label_set_text(title, text);
@@ -347,11 +595,14 @@ static void make_title(lv_obj_t *parent, const char *text, int y) {
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, y);
 }
 
-static void create_page_main(lv_obj_t *parent) {
+static void create_screen_main() {
+  scr_main = lv_obj_create(NULL);
+  lv_obj_t *parent = scr_main;
   lv_obj_set_style_bg_color(parent, COL_BG_MAIN, 0);
   lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
-  lv_obj_add_event_cb(parent, gesture_event_cb, LV_EVENT_GESTURE, NULL);
-  lv_obj_clear_flag(parent, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(parent, main_gesture_cb, LV_EVENT_GESTURE, NULL);
+  lv_obj_add_event_cb(parent, main_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
 
   // 270 degree humidity gauge with the gap at the bottom
   arc_hum = lv_arc_create(parent);
@@ -371,34 +622,42 @@ static void create_page_main(lv_obj_t *parent) {
   lbl_clock = lv_label_create(parent);
   lv_label_set_text(lbl_clock, "--:--");
   lv_obj_set_style_text_font(lbl_clock, &lv_font_montserrat_16, 0);
-  lv_obj_set_style_text_color(lbl_clock, lv_color_make(180, 210, 255), 0);
-  lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 48);
+  lv_obj_set_style_text_color(lbl_clock, COL_SOFT, 0);
+  lv_obj_align(lbl_clock, LV_ALIGN_TOP_MID, 0, 36);
+
+  create_wifi_indicator(parent);
 
   lbl_temp = lv_label_create(parent);
   lv_label_set_text(lbl_temp, "--.-°");
   lv_obj_set_style_text_font(lbl_temp, &lv_font_montserrat_48, 0);
   lv_obj_set_style_text_color(lbl_temp, COL_GREY, 0);
-  lv_obj_align(lbl_temp, LV_ALIGN_CENTER, 0, -8);
+  lv_obj_align(lbl_temp, LV_ALIGN_CENTER, 0, -24);
 
   lbl_hum_text = lv_label_create(parent);
   lv_label_set_text(lbl_hum_text, "Searching...");
   lv_obj_set_style_text_color(lbl_hum_text, COL_GREY, 0);
-  lv_obj_align(lbl_hum_text, LV_ALIGN_CENTER, 0, 36);
+  lv_obj_align(lbl_hum_text, LV_ALIGN_CENTER, 0, 18);
 
   lv_obj_t *panel = lv_obj_create(parent);
-  lv_obj_set_size(panel, 120, 48);
-  lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, -22);
+  lv_obj_set_size(panel, 120, 44);
+  lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, -42);
   lv_obj_set_style_bg_color(panel, COL_PANEL, 0);
   lv_obj_set_style_border_width(panel, 0, 0);
+  lv_obj_set_style_pad_all(panel, 0, 0);
   lv_obj_set_style_radius(panel, 15, 0);
   lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_clear_flag(panel, LV_OBJ_FLAG_CLICKABLE);        // let swipes reach the tile
+  lv_obj_clear_flag(panel, LV_OBJ_FLAG_CLICKABLE);        // let swipes / long press reach the screen
 
   lbl_pres = lv_label_create(panel);
   lv_label_set_text(lbl_pres, "---- hPa\n" LV_SYMBOL_BATTERY_EMPTY " -.-- V");
   lv_obj_set_style_text_align(lbl_pres, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(lbl_pres, lv_color_make(200, 220, 255), 0);
   lv_obj_center(lbl_pres);
+
+  // Footer: "<" previous sensor - name of the sensor shown - ">" next sensor
+  make_arrow(parent, "<", -54, step_cb, (void *)(intptr_t)-1);
+  make_arrow(parent, ">",  54, step_cb, (void *)(intptr_t)+1);
+  lbl_sensor = make_footer_text(parent, "Searching", COL_SOFT, NULL);
 }
 
 static void create_page_settings(lv_obj_t *parent) {
@@ -419,7 +678,7 @@ static void create_page_settings(lv_obj_t *parent) {
 
   lv_obj_t *night = lv_label_create(parent);
   lv_label_set_text(night, "Night dim (hours)");
-  lv_obj_set_style_text_color(night, lv_color_make(180, 210, 255), 0);
+  lv_obj_set_style_text_color(night, COL_SOFT, 0);
   lv_obj_align(night, LV_ALIGN_TOP_MID, 0, 72);
 
   const char *hours = "00\n01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23";
@@ -460,6 +719,8 @@ static void create_page_settings(lv_obj_t *parent) {
   lv_obj_align(sw_wifi_sleep, LV_ALIGN_TOP_MID, 42, 160);
   if (g_settings.wifi_auto_off) lv_obj_add_state(sw_wifi_sleep, LV_STATE_CHECKED);
   lv_obj_add_event_cb(sw_wifi_sleep, sw_sleep_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  setup_footer(parent, 0);
 }
 
 static void create_page_wifi(lv_obj_t *parent) {
@@ -472,7 +733,7 @@ static void create_page_wifi(lv_obj_t *parent) {
   lv_obj_set_width(wifi_status_lbl, 150);
   lv_label_set_text(wifi_status_lbl, "");
   lv_obj_set_style_text_align(wifi_status_lbl, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(wifi_status_lbl, lv_color_make(180, 210, 255), 0);
+  lv_obj_set_style_text_color(wifi_status_lbl, COL_SOFT, 0);
   lv_obj_align(wifi_status_lbl, LV_ALIGN_TOP_MID, 0, 34);
 
   lv_obj_t *btn = lv_btn_create(parent);
@@ -488,6 +749,8 @@ static void create_page_wifi(lv_obj_t *parent) {
   lv_obj_set_size(wifi_list, 170, 98);
   lv_obj_align(wifi_list, LV_ALIGN_TOP_MID, 0, 92);
   lv_obj_set_style_bg_color(wifi_list, COL_BG_MAIN, 0);
+
+  setup_footer(parent, 1);
 }
 
 static void create_page_sensor(lv_obj_t *parent) {
@@ -498,9 +761,9 @@ static void create_page_sensor(lv_obj_t *parent) {
   tag_cur_lbl = lv_label_create(parent);
   lv_label_set_long_mode(tag_cur_lbl, LV_LABEL_LONG_DOT);
   lv_obj_set_width(tag_cur_lbl, 150);
-  lv_label_set_text(tag_cur_lbl, "Using: auto");
+  lv_label_set_text(tag_cur_lbl, "Default: auto");
   lv_obj_set_style_text_align(tag_cur_lbl, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(tag_cur_lbl, lv_color_make(180, 210, 255), 0);
+  lv_obj_set_style_text_color(tag_cur_lbl, COL_SOFT, 0);
   lv_obj_align(tag_cur_lbl, LV_ALIGN_TOP_MID, 0, 34);
 
   lv_obj_t *btn = lv_btn_create(parent);
@@ -512,34 +775,50 @@ static void create_page_sensor(lv_obj_t *parent) {
   lv_obj_center(l);
   lv_obj_add_event_cb(btn, tag_refresh_btn_cb, LV_EVENT_CLICKED, NULL);
 
-  tag_list = lv_list_create(parent);
+  // Scrollable column of tick boxes; the ticked row is the default sensor
+  tag_list = lv_obj_create(parent);
   lv_obj_set_size(tag_list, 176, 98);
   lv_obj_align(tag_list, LV_ALIGN_TOP_MID, 0, 92);
+  lv_obj_set_flex_flow(tag_list, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_bg_color(tag_list, COL_BG_MAIN, 0);
+  lv_obj_set_style_border_width(tag_list, 0, 0);
+  lv_obj_set_style_radius(tag_list, 4, 0);
+  lv_obj_set_style_pad_all(tag_list, 6, 0);
+  lv_obj_set_style_pad_row(tag_list, 8, 0);
+
+  setup_footer(parent, 2);
 }
 
-void gui_init_ruuvi_hub(void) {
-  lv_obj_t *scr = lv_scr_act();
-  lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+static void create_screen_setup() {
+  scr_setup = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr_setup, lv_color_black(), 0);
+  lv_obj_clear_flag(scr_setup, LV_OBJ_FLAG_SCROLLABLE);
 
-  tv = lv_tileview_create(scr);
-  lv_obj_set_scrollbar_mode(tv, LV_SCROLLBAR_MODE_OFF);
-  lv_obj_add_event_cb(tv, tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  tv_setup = lv_tileview_create(scr_setup);
+  lv_obj_set_scrollbar_mode(tv_setup, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_add_event_cb(tv_setup, tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  page_main     = lv_tileview_add_tile(tv, 0, 0, LV_DIR_RIGHT);
-  page_settings = lv_tileview_add_tile(tv, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-  page_wifi     = lv_tileview_add_tile(tv, 2, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
-  page_sensor   = lv_tileview_add_tile(tv, 3, 0, LV_DIR_LEFT);
+  page_settings = lv_tileview_add_tile(tv_setup, 0, 0, LV_DIR_RIGHT);
+  page_wifi     = lv_tileview_add_tile(tv_setup, 1, 0, LV_DIR_LEFT | LV_DIR_RIGHT);
+  page_sensor   = lv_tileview_add_tile(tv_setup, 2, 0, LV_DIR_LEFT);
 
-  create_page_main(page_main);
   create_page_settings(page_settings);
   create_page_wifi(page_wifi);
   create_page_sensor(page_sensor);
+}
+
+void gui_init_ruuvi_hub(void) {
+  view_reset_to_default();
+
+  create_screen_main();
+  create_screen_setup();
+  lv_scr_load(scr_main);
 
   lv_timer_create(ui_update_cb, 500, NULL);
   lv_timer_create(clock_cb, 1000, NULL);
   lv_timer_create(wifi_poll_cb, 300, NULL);
 
+  gui_refresh_tags();
   ui_update_cb(NULL);
   clock_cb(NULL);
 }

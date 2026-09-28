@@ -16,5 +16,8 @@ void   wifi_scan_finish(void);        // frees the scan results
 void        wifi_connect(const char* ssid, const char* password);
 const char* wifi_status_text(void);
 
+// Signal strength in dBm of the current connection; 0 when not connected (or Wi-Fi is sleeping).
+int wifi_signal_dbm(void);
+
 // Local time; returns false until NTP has synced. Never blocks.
 bool wifi_get_time(struct tm* out);

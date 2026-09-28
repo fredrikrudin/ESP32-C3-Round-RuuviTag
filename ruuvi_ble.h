@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 #define RUUVI_MAX_SEEN 8
 
@@ -23,11 +24,11 @@ struct RuuviSeen {
 void init_ruuvi_ble(void);
 void tick_ruuvi_ble(void);
 
-// Copies the latest reading (thread-safe). Returns false if nothing received yet.
-bool ruuvi_get_reading(RuuviReading* out);
+// Latest reading of ONE specific tag (thread-safe). False if that tag has not been heard.
+bool ruuvi_get_reading(const uint8_t* mac, RuuviReading* out);
 
-// Copies the list of RuuviTags heard recently (thread-safe). Returns the count.
+// RuuviTags heard recently, sorted by MAC (stable order). Returns the count.
 int  ruuvi_get_seen(RuuviSeen* out, int max);
 
-// Lock to one tag (mac = 6 bytes) or pass nullptr for "auto (strongest signal)".
-void ruuvi_select_mac(const uint8_t* mac);
+// "Ruuvi 2233" - same short name the RuuviTag advertises (last two MAC bytes).
+void ruuvi_format_name(const uint8_t* mac, char* out, size_t n);

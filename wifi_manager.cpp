@@ -137,6 +137,11 @@ void tick_wifi_manager(void) {
   }
 }
 
+int wifi_signal_dbm(void) {
+  if (asleep || WiFi.status() != WL_CONNECTED) return 0;
+  return WiFi.RSSI();
+}
+
 const char* wifi_status_text(void) {
   static char buf[64];
   if (asleep) return "Wi-Fi sleeping";

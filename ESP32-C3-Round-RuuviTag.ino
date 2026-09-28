@@ -72,6 +72,7 @@ void setup() {
   lv_indev_drv_init(&indev_drv);
   indev_drv.type = LV_INDEV_TYPE_POINTER;
   indev_drv.read_cb = my_touch_read;
+  indev_drv.long_press_time = LONG_PRESS_MS;   // long press on the main screen opens setup
   lv_indev_drv_register(&indev_drv);
 
   gui_init_ruuvi_hub();
