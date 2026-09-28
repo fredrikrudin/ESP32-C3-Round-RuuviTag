@@ -1,50 +1,92 @@
-# ESP32-C3 Round RuuviTag Display Hub (GC9A01) (By Gemini AI)
+# ESP32-C3 Round RuuviTag Display Hub (GC9A01)
 
-A modern, wearable/smartwatch-inspired dashboard interface built completely using **LVGL v8** for circular ESP32 boards (such as the ESP32-2424S012 / GC9A01 screen module). The hub dynamically intercepts BLE advertisements from nearby **RuuviTags**, parsing and rendering live real-time values including Temperature, Relative Humidity, Air Pressure, and sensor battery levels.
+RuuviTag dashboard for the round **ESP32-2424S012** (ESP32-C3, 1.28" 240x240 GC9A01, CST816S touch),
+built with LVGL 8. It listens to RuuviTag BLE advertisements (data format 5) and shows temperature,
+humidity, pressure and battery voltage, plus an NTP clock.
 
-##Hardware: 
-ESP32 Display 1.28 inch ESP32-C3 WiFi+BLE TFT LCD Module ESP32-2424S012 240x240 GC9A01 Touch Screen for Arduino IoT Smart Home
-
-##AliExpress: 
-https://www.aliexpress.com/item/1005007051709033.html
+> Status: revised version of the Gemini-generated original. **Not compiled or tested on hardware by the
+> reviewer** - check the pins in `config.h` first, and expect to fix small compile issues.
 
 ## Features
-- 🔹 **Deep Blue Neon UI**: High-contrast, clean circular graphs and layouts.
-- 🔹 **Real-time Synchronization Clock**: Internet NTP-time displayed in 24h format.
-- 🔹 **On-Screen Wi-Fi Manager**: Interactively scan and connect to local Wi-Fi hotspots via touch keyboard inputs.
-- 🔹 **Flash Retention**: Credentials and configurations persist across reboots via the native NVS `Preferences` library.
-- 🔹 **Smart Auto-Dimming**: Enforces user-defined quiet night hours via software-controlled PWM backlighting loops.
-- 🔹 **Manual Swipe Gestures**: Swipe Up or Down anywhere on the main screen to modify screen brightness steps.
-- 🔹 **BLE Duty Cycle Tuning**: Modify update intervals inside settings to conserve energy and eliminate chip thermal issues.
 
-## Dependencies & Environment (Arduino IDE)
-Ensure the following libraries are installed via your Library Manager:
-- `NimBLE-Arduino` (by h2zero)
-- `lvgl` (Strictly within the **8.x.x** lifecycle, e.g., v8.3.11)
-- `TFT_eSPI` (by Bodmer)
+- Temperature / humidity gauge / pressure / battery voltage, colour-coded, greys out and shows
+  "No signal Nm" when the tag has not been heard for a while
+- Lock to one RuuviTag (Sensor page) or follow the strongest one automatically
+- Touch UI: swipe left/right between **Main | Settings | Wi-Fi | Sensor**; swipe up/down on Main = brightness
+- Night dimming with configurable hours; touching the screen at night wakes it for 20 s
+- On-screen Wi-Fi setup (async scan, password keyboard); credentials are saved only after a successful connection
+- Optional "Wi-Fi sleep": Wi-Fi turns off after the NTP sync and wakes once a day to re-sync (less heat)
+- Scan interval, night hours, brightness, Wi-Fi sleep and selected tag persist in flash (NVS)
 
-## Warning
-When installing lvgl via the Arduino IDE's Library Manager, make sure you absolutely do not install the latest version (v9.x). The code will crash with hundreds of error messages if run on version 9. Manually select a version in the 8.3 series (e.g. v8.3.11) from the drop-down list before pressing install.
+## Hardware
 
-### Driver Setup (`User_Setup.h`)
-Navigate to your computer's `libraries/TFT_eSPI/` installation path and swap or append these active configurations into `User_Setup.h`:
-If you have a standard ESP32-2424S012 (GC9A01 1.28"): Then GPIO 22 controls the screen backlight. If you leave #define TFT_BL 3, the screen will remain completely black because the wrong pin is sending out the brightness. Double-check your specific hardware manual and change to 22 if the screen does not light up.
-```cpp
-#define GC9A01_DRIVER
-#define TFT_MISO -1
-#define TFT_MOSI 7
-#define TFT_SCLK 6
-#define TFT_CS   2
-#define TFT_DC   3
-#define TFT_RST  10
-#define TFT_BL   22 <--
-#define TFT_BL 3 <--
-#define SPI_FREQUENCY  40000000
-#define LOAD_GLCD
+ESP32-2424S012 (AliExpress: <https://www.aliexpress.com/item/1005007051709033.html>)
+
+Pins are collected in `config.h` (backlight, touch I2C) and `User_Setup_ESP32-2424S012.h` (display).
+The ESP32-C3 only has GPIO0-GPIO21 - GPIO22 does not exist on it.
+The values in this repo are from memory of the board's pinout: **verify them** against your board docs or a
+sketch that already works on it.
+
+## Libraries / environment (Arduino IDE)
+
+| Library | Version |
+|---|---|
+| `lvgl` | **8.3.x** (e.g. 8.3.11) - not 9.x |
+| `TFT_eSPI` (Bodmer) | recent; make sure it supports your arduino-esp32 core version |
+| `NimBLE-Arduino` (h2zero) | **1.4.x** - 2.x has a different scan API |
+
+Board: `ESP32C3 Dev Module`, Flash 4MB, Partition `Minimal SPIFFS (Large APPS with OTA)`.
+The backlight code works on arduino-esp32 core 2.x and 3.x.
+
+### lv_conf.h (place next to the `lvgl` folder in `libraries/`)
+
+```c
+#define LV_COLOR_DEPTH      16
+#define LV_COLOR_16_SWAP    0
+#define LV_MEM_SIZE         (40U * 1024U)
+#define LV_FONT_MONTSERRAT_16 1
+#define LV_FONT_MONTSERRAT_48 1
+// LV_TICK_CUSTOM may be 0 or 1: the sketch calls lv_tick_inc() only when it is 0.
+// Widgets used: arc, label, list, keyboard, textarea, roller, dropdown, switch, tileview, btn (all default-on)
 ```
 
-### Compiler Configurations (Tools Menu)
-Ensure your target board compile settings match these options before hitting Upload:
-- **Board**: `ESP32C3 Dev Module`
-- **Flash Size**: `4MB`
-- **Partition Scheme**: `Minimal SPIFFS (Large APPS with OTA)`
+### TFT_eSPI
+
+Use `User_Setup_ESP32-2424S012.h` as a template for `libraries/TFT_eSPI/User_Setup.h`.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `ESP32-C3-Round-RuuviTag.ino` | display + touch drivers for LVGL, main loop |
+| `config.h` | pins, time zone, timings |
+| `settings.*` | persistent settings (NVS), debounced saving |
+| `ruuvi_ble.*` | BLE scan, format-5 parser, tag selection, thread-safe data access |
+| `wifi_manager.*` | async scan, connect, NTP, Wi-Fi sleep (no LVGL dependency) |
+| `gui_ruuvi.*` | all LVGL screens, laid out for the round display |
+| `backlight.*` | PWM backlight |
+| `touch_cst816s.*` | minimal CST816S I2C driver |
+
+## What changed compared to the original
+
+**Correctness**
+- Ruuvi manufacturer ID bytes were checked in the wrong order (`99 04` on the air) - packets never matched
+- Uses only LVGL 8.3 API names (the original mixed in v9 names such as `lv_list_add_button`, `lv_button_create`,
+  `lv_obj_delete`, `LV_SYMBOL_BATTERY`)
+- Added the missing touch driver + LVGL input device, and an LVGL tick source
+- Network list buttons now actually have a click handler
+- `wantDuplicates = true`, so "Continuous" mode keeps updating
+- Invalid sensor values (0x8000 / 0xFFFF / 0x7FF) are detected; bytes are parsed as `uint8_t`
+
+**Robustness**
+- BLE task -> UI data passed under a spinlock
+- Non-blocking `getLocalTime(.., 0)` and asynchronous Wi-Fi scan (no UI freezes)
+- Wi-Fi credentials saved only after a successful connection; falls back to the old network on failure
+- Password dialog is a single modal, deleted with `lv_obj_del_async`
+- Stale-data indicator; continuous scan restarts once a minute to flush the result list
+
+**Usability**
+- Select which RuuviTag to show; auto mode follows the strongest one
+- Settings persist; rollers show the real values; night mode can be overridden by touch
+- Battery shown as voltage, with a battery icon
+- Widgets moved inside the visible circle (keyboard, list, text fields)
