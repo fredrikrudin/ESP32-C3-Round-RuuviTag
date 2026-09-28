@@ -336,7 +336,7 @@ static void scan_wifi_event_cb(lv_event_t *e) {
   if (wifi_scanning) return;
   if (wifi_scan_start()) {
     wifi_scanning = true;
-    lv_list_clean(wifi_list);
+    lv_obj_clean(wifi_list);
     lv_label_set_text(btn_scan_lbl, "Scanning...");
   } else {
     lv_label_set_text(btn_scan_lbl, "Scan failed");
@@ -344,7 +344,7 @@ static void scan_wifi_event_cb(lv_event_t *e) {
 }
 
 static void populate_wifi_list(int n) {
-  lv_list_clean(wifi_list);
+  lv_obj_clean(wifi_list);
   ssid_count = 0;
   for (int i = 0; i < n && ssid_count < MAX_NETS; i++) {
     String s = wifi_scan_ssid(i);

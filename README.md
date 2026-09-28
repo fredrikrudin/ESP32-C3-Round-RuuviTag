@@ -66,12 +66,16 @@ sketch that already works on it.
 |---|---|
 | `lvgl` | **8.3.x** (e.g. 8.3.11) - not 9.x |
 | `TFT_eSPI` (Bodmer) | recent; make sure it supports your arduino-esp32 core version |
-| `NimBLE-Arduino` (h2zero) | **1.4.x** - 2.x has a different scan API |
+| `NimBLE-Arduino` (h2zero) | **2.x** (the code uses `NimBLEScanCallbacks` / `setScanCallbacks`; 1.4.x will not compile) |
 
 Board: `ESP32C3 Dev Module`, Flash 4MB, Partition `Minimal SPIFFS (Large APPS with OTA)`.
 The backlight code works on arduino-esp32 core 2.x and 3.x.
 
 ### lv_conf.h (place next to the `lvgl` folder in `libraries/`)
+
+A ready-to-use minimal file is in [`docs/lv_conf.h`](docs/lv_conf.h): copy it to `libraries/lv_conf.h`.
+Options it does not mention use LVGL's defaults (the full list is `lvgl/lv_conf_template.h`).
+The key settings are:
 
 ```c
 #define LV_COLOR_DEPTH      16

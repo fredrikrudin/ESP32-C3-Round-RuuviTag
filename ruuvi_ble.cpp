@@ -55,11 +55,12 @@ static void handle_format5(const uint8_t* d, int rssi) {
   portEXIT_CRITICAL(&mux);
 }
 
-class RuuviCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* dev) override {
-    std::string s = dev->getManufacturerData();
-    if (s.length() < 26) return;
-    const uint8_t* d = (const uint8_t*)s.data();
+// NimBLE-Arduino 2.x API (NimBLEScanCallbacks, const device pointer)
+class RuuviCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* dev) override {
+    auto md = dev->getManufacturerData();          // company id (LE) + payload
+    if (md.size() < 26) return;
+    const uint8_t* d = (const uint8_t*)md.data();
     // Company id 0x0499 is sent little-endian (99 04). Data format 5 = 0x05.
     if (d[0] != 0x99 || d[1] != 0x04 || d[2] != 0x05) return;
     handle_format5(d, dev->getRSSI());
@@ -116,10 +117,10 @@ void init_ruuvi_ble(void) {
   NimBLEScan* pScan = NimBLEDevice::getScan();
   // wantDuplicates = true: otherwise a tag is reported only once per scan and
   // "Continuous" mode would never update after the first packet.
-  pScan->setAdvertisedDeviceCallbacks(&callbacks, true);
+  pScan->setScanCallbacks(&callbacks, true);
   pScan->setActiveScan(false);      // passive is enough: Ruuvi data is in the advertisement
-  pScan->setInterval(200);          // units of 0.625 ms
-  pScan->setWindow(150);
+  pScan->setInterval(125);          // NimBLE 2.x: milliseconds
+  pScan->setWindow(94);
 }
 
 void tick_ruuvi_ble(void) {
@@ -132,13 +133,13 @@ void tick_ruuvi_ble(void) {
     // (it would otherwise grow with every BLE device in range).
     if (!pScan->isScanning() || !continuous_running) {
       pScan->clearResults();
-      pScan->start(0, nullptr, false);
+      pScan->start(0, false, true);          // 0 = scan until stopped
       continuous_running = true;
       last_clear_ms = now;
     } else if (now - last_clear_ms > 60000UL) {
       pScan->stop();
       pScan->clearResults();
-      pScan->start(0, nullptr, false);
+      pScan->start(0, false, true);          // 0 = scan until stopped
       last_clear_ms = now;
     }
   } else {
@@ -147,7 +148,7 @@ void tick_ruuvi_ble(void) {
       continuous_running = false;
     }
     if (!pScan->isScanning() && (now - last_scan_ms >= (uint32_t)interval * 1000UL)) {
-      pScan->start(BLE_SCAN_WINDOW_S, nullptr, false);   // start() clears old results itself
+      pScan->start(BLE_SCAN_WINDOW_S * 1000UL, false, true);   // milliseconds; clears old results itself
       last_scan_ms = now;
     }
   }
